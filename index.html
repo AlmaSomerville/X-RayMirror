@@ -570,7 +570,7 @@ const DEFAULTS = { skull: true, brain: false, muscles: false, eyes: true, outlin
                    tHead: true, tHands: true, tBody: false, level: "adult" };
 const USER_S = Object.assign({}, DEFAULTS);
 try { const st = JSON.parse(localStorage.getItem("xr_settings") || "{}"); Object.assign(USER_S, st); if (st.hands === false && st.tHands === undefined) USER_S.tHands = false; } catch (e) {}
-const HERO_S = Object.assign({}, DEFAULTS, { tHead: false, tHands: false, tBody: true, style: "solid", skull: true, brain: false, muscles: false,
+const HERO_S = Object.assign({}, DEFAULTS, { tHead: true, tHands: false, tBody: true, style: "solid", skull: true, brain: false, muscles: false,
                                              eyes: false, outline: false, real: 1 });     // the look of the first screen: a plain bone-white skeleton     // the look of the first screen
 let S = USER_S;
 function save() { try { localStorage.setItem("xr_settings", JSON.stringify(USER_S)); } catch (e) {} }
@@ -1031,19 +1031,36 @@ function place(seg, O, X, Y, Z, sx, sy, sz) {       // put a body part at O, fac
   bT.B.makeBasis(bT.a.copy(X).multiplyScalar(sx), bT.b.copy(Y).multiplyScalar(sy), bT.c.copy(Z).multiplyScalar(sz)).setPosition(O);
   seg.group.matrix.multiplyMatrices(bT.B, seg.inv); seg.group.matrixWorldNeedsUpdate = true; seg.group.visible = true;
 }
-function updateBody(raw, dt, now) {
+function trackBody(raw, dt, now) {                      // step 1: take in the tracker's points
   if (raw) {
     if (!body.found) { for (const f of body.filt) f.reset(); body.sRef = 0; }
     const k = steadyK();
     body.lms = raw.map((p, i) => { const o = body.filt[i].run([p.x, p.y, p.z], dt, k); return { x: o[0], y: o[1], z: o[2], v: p.visibility === undefined ? 1 : p.visibility }; });
     body.found = true; body.seen = now;
   } else if (body.found && now - body.seen > 350) body.found = false;      // ride out a dropped frame or two
-  hideBody();
+  hideBody(); body.ready = false;
   if (!body.found || !BODY || !S.tBody) return;
-  const L = body.lms, P = body.P, ok = i => L[i].v > 0.5;
+  const L = body.lms, P = body.P;
   for (let i = 0; i < 33; i++) P[i].set(L[i].x * W, (1 - L[i].y) * H, -L[i].z * W);
-  if (!(ok(11) && ok(12))) return;                     // needs both shoulders
+  body.ready = L[11].v > 0.5 && L[12].v > 0.5;         // needs both shoulders
+}
+function placeBody() {                                  // step 2 (after the hands are known): stand the skeleton on those points
+  if (!body.ready) return;
+  const L = body.lms, P = body.P, ok = i => L[i].v > 0.5;
   body.shown = true;
+  // A tracked hand knows where its wrist is better than the body tracker does. End the forearm there, so arm and hand always meet.
+  const used = [];
+  for (const [w, right] of [[15, false], [16, true]]) {
+    let best = null, bd = 0.25;
+    for (const rig of handRigs) {
+      if (!rig.active || !rig.lms || used.includes(rig)) continue;
+      const d = Math.hypot(rig.lms[0].x - L[w].x, rig.lms[0].y - L[w].y) + (rig.side === right ? 0 : 0.08);
+      if (d < bd) { bd = d; best = rig; }
+    }
+    if (!best) continue;
+    used.push(best); L[w].x = best.lms[0].x; L[w].y = best.lms[0].y; if (L[w].v < 0.6) L[w].v = 0.6;
+    P[w].x = L[w].x * W; P[w].y = (1 - L[w].y) * H;
+  }
   // chest and belly: one block from the hips up to the shoulders
   const T = bodySeg.torso, O = bT.O.addVectors(P[23], P[24]).multiplyScalar(0.5), X = body.X, Z = body.Z;
   const Y = body.Y.addVectors(P[11], P[12]).multiplyScalar(0.5);                 // the middle of the shoulders, for now
@@ -1053,7 +1070,8 @@ function updateBody(raw, dt, now) {
   // A trunk that comes out much too short for its shoulders is such a guess: build it from the shoulders alone and leave the legs out.
   const flat = Math.hypot(span.x, span.y) / T.Ly, sxFlat = Math.hypot(P[11].x - P[12].x, P[11].y - P[12].y) / T.Ws;   // measured on the picture, ignoring the (guessed) depth
   body.ratio = flat / (sxFlat || 1);
-  const cropped = body.cropped = !hipsOK || body.ratio < 0.8;      // an upright trunk measures about 1.0 here; the tracker's "visible" score is no help, it rates guessed hips as visible
+  const cropped = body.cropped = !hipsOK || body.ratio < (body.cropped ? 0.95 : 0.8);   // once it has switched, it takes a clear change to switch back (no flickering between the two)
+  //      // an upright trunk measures about 1.0 here; the tracker's "visible" score is no help, it rates guessed hips as visible
   let sx, sy;
   if (cropped) {
     // this close the tracker's depth is a guess too, so the trunk is laid flat on the picture
@@ -1082,7 +1100,9 @@ function updateBody(raw, dt, now) {
     if (!(ok(i) && ok(j)) || (cropped && i >= 23)) continue;
     const d = bT.lY.subVectors(P[j], P[i]), len = d.length(); if (len < 1e-3) continue;
     if (!axes(d, Z, bT.lX, bT.lY, bT.lZ) && !axes(d, X, bT.lX, bT.lY, bT.lZ)) continue;
-    place(bodySeg[name], P[i], bT.lX, bT.lY, bT.lZ, sB, Math.min(1.7 * sB, Math.max(0.4 * sB, len / bodySeg[name].L)), sB);
+    // an arm held towards the camera looks longer and thicker than the body's own scale says, so the bone may stretch a long way to reach its joint
+    const along = Math.min(3.2 * sB, Math.max(0.4 * sB, len / bodySeg[name].L)), across = Math.min(1.8 * sB, Math.max(sB, along * 0.85));
+    place(bodySeg[name], P[i], bT.lX, bT.lY, bT.lZ, across, along, across);
   }
   for (const [name, , , , a, h, t, knee] of FEET) {
     if (cropped || !(ok(a) && ok(h) && ok(t))) continue;
@@ -1092,11 +1112,13 @@ function updateBody(raw, dt, now) {
     place(bodySeg[name], P[a], bT.lX, bT.lY, bT.lZ, s, s, s);
   }
 }
-function poseHead() {              // no face tracker running: stand the head on the body from the body tracker's eye and mouth points
+function poseHead() {              // Head is on but no face was found (far away): stand a head on the body from the body tracker's eye and mouth points
   const L = body.lms, P = body.P;
   if (!(L[2].v > 0.5 && L[5].v > 0.5)) return;
-  const O = bT.O.addVectors(P[2], P[5]).multiplyScalar(0.5), X = bT.lX.subVectors(P[2], P[5]), w = X.length(); if (w < 1e-3) return; X.normalize();
-  const Y = bT.lY.copy(O).sub(bT.a.addVectors(P[9], P[10]).multiplyScalar(0.5)); Y.addScaledVector(X, -Y.dot(X));
+  // Measured flat on the picture: the body tracker's depth for the face is too rough, and using it made the head huge and tipped over.
+  const O = bT.O.addVectors(P[2], P[5]).multiplyScalar(0.5), X = bT.lX.subVectors(P[2], P[5]); X.z = 0;
+  const w = X.length(); if (w < 1e-3) return; X.normalize();
+  const Y = bT.lY.copy(O).sub(bT.a.addVectors(P[9], P[10]).multiplyScalar(0.5)); Y.z = 0; Y.addScaledVector(X, -Y.dot(X));
   const u = Y.length(); if (u < 1e-3) return; Y.normalize();
   const Zv = bT.lZ.crossVectors(X, Y), s = Math.max(w / headWm, u / headUm);      // a turned head looks narrower, never wider, so trust the larger measure
   bT.B.makeBasis(bT.a.copy(X).multiplyScalar(s), bT.b.copy(Y).multiplyScalar(s), bT.c.copy(Zv).multiplyScalar(s)).setPosition(O);
@@ -1368,9 +1390,9 @@ frame.addEventListener("pointerleave", e => { if (e.pointerType === "mouse") poi
 function renderFrame(now, faceLms, hands, sides, dt, poseLms) {
   const sg = $("shade").getContext("2d"); sg.clearRect(0, 0, W, H);
   // body
-  updateBody(poseLms, dt, now);
-  if (body.shown) {
-    drawBodyVeil(sg, body.lms, (1 - S.real) * 0.8);
+  trackBody(poseLms, dt, now);
+  if (body.ready) {
+    if (TEST_HANDOFF) { const hs = bodyHands([]); hands = hs.map(h => h.lms.map(p => ({ x: p.x + 0.05, y: p.y - 0.05, z: p.z }))); sides = hs.map(h => h.right); }
     for (const h of bodyHands(hands)) { hands = hands.concat([h.lms]); sides = sides.concat([h.right]); }
   }
   // hands
@@ -1395,7 +1417,9 @@ function renderFrame(now, faceLms, hands, sides, dt, poseLms) {
     rig.group.visible = show;
     if (rig.active) { activeHands++; if (!tipRig) tipRig = rig; }
   });
-  if (!head.found) { headGroup.visible = false; headOrtho = false; if (body.shown) poseHead(); }
+  placeBody();
+  if (body.shown) drawBodyVeil(sg, body.lms, (1 - S.real) * 0.8);
+  if (!head.found) { headGroup.visible = false; headOrtho = false; if (body.shown && S.tHead) poseHead(); }   // Head switched off means no head at all
   applyLayers();
 
   // x-ray lens: a round window; outside it you see the plain camera picture
@@ -1522,7 +1546,7 @@ $("photoclose").onclick = () => { $("photo").hidden = true; };
 let mode = "idle";                                     // idle | hero (first screen) | demo | starting | live | stopped
 let visionMod = null, visionFiles = null, faceTracker = null, handTracker = null, poseTracker = null, poseUrl = "";
 let makeFace = null, makeHand = null, makePose = null, faceOn = "GPU", loadP = null, poseP = null, bodyBusy = false, slowSince = 0;
-const TEST_FAIL = isLocal && QS.has("failgpu");        // test hook (only on a developer machine): make the graphics-chip tracker throw
+const TEST_FAIL = isLocal && QS.has("failgpu"), TEST_HANDOFF = isLocal && QS.has("handoff");   // second hook: pretend the hand tracker sees the hands a little away from the body tracker's wrists        // test hook (only on a developer machine): make the graphics-chip tracker throw
 const short = e => { const m = e && e.message ? e.message : String(e); return m.length > 150 ? m.slice(0, 150) + "…" : m; };
 function loadTrackers() {
   if (!loadP) loadP = (async () => {
