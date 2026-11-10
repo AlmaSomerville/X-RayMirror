@@ -571,7 +571,8 @@ const DEFAULTS = { skull: true, brain: false, muscles: false, eyes: true, outlin
 const USER_S = Object.assign({}, DEFAULTS);
 try { const st = JSON.parse(localStorage.getItem("xr_settings") || "{}"); Object.assign(USER_S, st); if (st.hands === false && st.tHands === undefined) USER_S.tHands = false; } catch (e) {}
 const HERO_S = Object.assign({}, DEFAULTS, { tHead: true, tHands: false, tBody: true, style: "solid", skull: true, brain: false, muscles: false,
-                                             eyes: false, outline: false, real: 1 });     // the look of the first screen: a plain bone-white skeleton     // the look of the first screen
+                                             eyes: false, outline: false, real: 1 });     // the look of the first screen: a plain bone-white skeleton...
+const HERO_X = Object.assign({}, HERO_S, { style: "xray", brain: true, eyes: true, outline: true });   // ...and its see-through half     // the look of the first screen
 let S = USER_S;
 function save() { try { localStorage.setItem("xr_settings", JSON.stringify(USER_S)); } catch (e) {} }
 const LAYERS = ["skull", "brain", "muscles", "eyes", "outline"], LAYER_KEY = { skull: "bones", brain: "organs", muscles: "facemuscles", eyes: "eyes", outline: "outline" };
@@ -1161,19 +1162,21 @@ function drawBodyVeil(g, L, alpha) {
 function demoPose(tt, hero) {
   const vw = VIS.x1 - VIS.x0, vh = VIS.y1 - VIS.y0;
   let k, cxs, floorUp, yawAmp = 0.3, a, b;
-  if (hero) {                      // first screen: from the hips up, one arm raised, waving hello
+  let a2 = 0.12 + 0.08 * Math.sin(tt * 0.7), tilt = 0.07 * Math.sin(tt * 0.8);
+  if (hero) {                      // first screen: a still figure from the hips up, standing straight, arms a little out
     const wide = vw > vh * 1.15;
-    k = wide ? vh * 0.8 / 112 : Math.min(vh * 0.56 / 108, vw * 0.86 / 78);
-    cxs = wide ? VIS.x0 + vw * 0.3 : (VIS.x0 + VIS.x1) / 2 + 9 * k;
-    floorUp = H - (VIS.y0 + (wide ? vh * 0.07 : 62)) - 188 * k;        // the waving fingertips reach about 188 cm
-    yawAmp = 0.16; a = 1.85 + 0.05 * Math.sin(tt * 1.1); b = 0.95 + 0.36 * Math.sin(tt * 4.2);
+    k = wide ? vh * 0.86 / 100 : Math.min(vh * 0.56 / 92, vw * 0.9 / 66);
+    cxs = wide ? VIS.x0 + vw * 0.3 : (VIS.x0 + VIS.x1) / 2;
+    floorUp = H - (VIS.y0 + (wide ? vh * 0.07 : 62)) - 170 * k;        // the top of the skull is about 167 cm up
+    yawAmp = 0; a = 0.06; b = 0; a2 = 0.06; tilt = 0;
   } else {
     const top = INSET.top + 6, bot = INSET.bottom + 8;
     k = Math.min((vh - top - bot) / 168, vw * 0.92 / 68); cxs = (VIS.x0 + VIS.x1) / 2; floorUp = H - (VIS.y1 - bot);
     a = 0.55 + 0.45 * Math.sin(tt * 0.9); b = 0.5 + 0.5 * Math.sin(tt * 1.7);
   }
   const cxp = mx(cxs), yaw = yawAmp * Math.sin(tt * 0.5), cy = Math.cos(yaw), sy = Math.sin(yaw);
-  const a2 = 0.12 + 0.08 * Math.sin(tt * 0.7), tilt = 0.07 * Math.sin(tt * 0.8), neck = [0, 148, 0];
+  const neck = [0, 148, 0];
+  if (hero) heroSplitX = cxp;                                          // the figure's midline, where the two looks meet
   const rot = (p, piv, ang) => { const c = Math.cos(ang), s = Math.sin(ang), x = p[0] - piv[0], y = p[1] - piv[1]; return [piv[0] + x * c - y * s, piv[1] + x * s + y * c, p[2]]; };
   const R = BODY.pose, EL = rot(R[13], R[11], a), ER = rot(R[14], R[12], -a2), out = [];
   for (let i = 0; i < 33; i++) {
@@ -1411,13 +1414,11 @@ function renderFrame(now, faceLms, hands, sides, dt, poseLms) {
     if (show) {
       updateHand(rig, rig.lms, rig.side);
       drawHandVeil(sg, rig.lms, (1 - S.real) * 0.92);
-      for (const m of [rig.palm, ...rig.bones]) { m.material.uniforms.uGain.value = S.style === "solid" ? Math.min(1.25, 0.6 + 0.4 * S.bright) : S.bright * 1.15;
-                                                 m.material.uniforms.uFeather.value = S.feather * 0.75; }
     }
     rig.group.visible = show;
     if (rig.active) { activeHands++; if (!tipRig) tipRig = rig; }
   });
-  placeBody();
+  styleHands(); placeBody();
   if (body.shown) drawBodyVeil(sg, body.lms, (1 - S.real) * 0.8);
   if (!head.found) { headGroup.visible = false; headOrtho = false; if (body.shown && S.tHead) poseHead(); }   // Head switched off means no head at all
   applyLayers();
@@ -1437,11 +1438,7 @@ function renderFrame(now, faceLms, hands, sides, dt, poseLms) {
   for (const id of ["gl", "shade"]) { const st = $(id).style; st.maskImage = mask; st.webkitMaskImage = mask; }
 
   renderer.clear();
-  renderer.render(bodyScene, ortho);
-  renderer.clearDepth();
-  renderer.render(headScene, headOrtho ? ortho : cam);
-  renderer.clearDepth();
-  renderer.render(handScene, ortho);
+  if (mode === "hero" && body.shown) drawHeroSplit(); else drawScenes();
 
   // heads-up layer: lens ring, names, and the tracking points when switched on
   const hud = $("hud"), g = hud.getContext("2d");
@@ -1494,6 +1491,30 @@ function renderFrame(now, faceLms, hands, sides, dt, poseLms) {
     slowSince = mode === "live" && fps < 11 ? (slowSince || now) : 0; updateSlowHint();
   }
   return activeHands;
+}
+function drawScenes() {
+  renderer.render(bodyScene, ortho);
+  renderer.clearDepth();
+  renderer.render(headScene, headOrtho ? ortho : cam);
+  renderer.clearDepth();
+  renderer.render(handScene, ortho);
+}
+function styleHands() {
+  for (const rig of handRigs) for (const m of [rig.palm, ...rig.bones]) {
+    m.material.uniforms.uGain.value = S.style === "solid" ? Math.min(1.25, 0.6 + 0.4 * S.bright) : S.bright * 1.15;
+    m.material.uniforms.uFeather.value = S.feather * 0.75;
+  }
+}
+// First screen: the same figure drawn twice, each look kept to its own half of the picture, like a cutaway model:
+// plain bones on one side, seen-through with brain and organs on the other.
+let heroSplitX = 0;
+function drawHeroSplit() {
+  const xs = Math.max(0, Math.min(W, heroSplitX));
+  renderer.setScissorTest(true);
+  renderer.setScissor(0, 0, xs, H); drawScenes();
+  S = HERO_X; applyStyle(); applyLayers(); styleHands();
+  renderer.setScissor(xs, 0, W - xs, H); renderer.clearDepth(); drawScenes();
+  S = HERO_S; applyStyle(); renderer.setScissorTest(false);
 }
 function blankPicture() {                              // wipe the overlay (used when switching from the first screen to the camera)
   if (!renderer) return;
@@ -1722,6 +1743,11 @@ function simLoop(kind) {
     if (!still) requestAnimationFrame(tick);
     const now = performance.now(), tt = still ? 1.2 : now / 1000, dt = clampDt((now - lastT) / 1000); lastT = now;
     if (S.tBody && BODY) {
+      if (hero) {                                        // a still picture: drawn when it is ready, when the screen changes shape, and once a second to be safe
+        const key = W + "x" + H;
+        if (key === heroKey && now - heroAt < 1000) return;
+        heroKey = key; heroAt = now; body.found = false; for (const r of handRigs) r.active = false;     // no easing between redraws
+      }
       head.found = false; renderFrame(now, null, [], [], dt, demoPose(tt, hero));
       if (hero) document.body.classList.add("hero-on");
       return;
@@ -1753,6 +1779,7 @@ function simLoop(kind) {
   tick();
 }
 
+let heroKey = "", heroAt = 0;
 let bootP = null;
 function boot() {
   if (!bootP) bootP = (async () => {
